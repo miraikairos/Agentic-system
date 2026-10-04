@@ -5,38 +5,12 @@ const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
 });
 
-/*
-  Render free instances sleep when idle. The frontend only wakes the Decision Engine, so the first call to the
-  Research Engine can hit a service that is still starting and get a 502/504 from Render's proxy.
-  wakeResearchEngine() holds until the service answers; fetchWithRetry() retries once on a gateway error.
-*/
-async function wakeResearchEngine(url) {
-  try {
-    await fetch(`${url}/health`, { signal: AbortSignal.timeout(75000) });
-  } catch (e) {
-    console.warn("Research Engine warm-up failed:", e.message);
-  }
-}
-
-async function fetchWithRetry(url, options, retries = 2) {
-  let response;
-  for (let i = 0; i < retries; i++) {
-    response = await fetch(url, options);
-    if (response.status !== 502 && response.status !== 504) return response;
-    console.warn(`Research Engine returned ${response.status} (probably starting up), attempt ${i + 1}/${retries}`);
-    if (i < retries - 1) await new Promise((r) => setTimeout(r, 8000));
-  }
-  return response;
-}
-
 async function getResearchFromMember2(data) {
   const url =
     process.env.RESEARCH_ENGINE_URL ||
     "http://localhost:4002";
 
-  await wakeResearchEngine(url);
-
-  const response = await fetchWithRetry(
+  const response = await fetch(
     `${url}/research`,
     {
       method: "POST",
