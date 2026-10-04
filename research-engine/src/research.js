@@ -1,34 +1,59 @@
-import { askJSON } from "./gemini.js";
+import { askJSON, getModel } from "./gemini.js";
 import { webSearch } from "./search.js";
 import {
+  KEYS,
   buildWeights,
   scoreCandidates,
-  buildShortlist
+  buildShortlist,
+  isDirectSolution
 } from "./scoring.js";
-import { FALLBACK_CANDIDATES } from "./fallback.js";
+import { GENERIC_APPROACHES, genericFallbackAllowed } from "./fallback.js";
 
+const RESEARCH_ATTEMPTS = 2; // full research attempts (each askJSON call also retries transient errors itself)
+
+// Thrown when research genuinely failed and no relevant candidates exist.
+// server.js turns it into HTTP 503 so the Decision Engine never plans from unrelated candidates.
+export class ResearchUnavailableError extends Error {
+  constructor(message, warnings = []) {
+    super(message);
+    this.name = "ResearchUnavailableError";
+    this.code = "RESEARCH_UNAVAILABLE";
+    this.warnings = warnings;
+  }
+}
+
+function goalText(req) {
+  const g = req.goal;
+  if (typeof g === "string") return g.trim();
+  if (g && typeof g === "object") {
+    return String(g.objective || g.goal || g.title || JSON.stringify(g)).trim();
+  }
+  return "";
+}
+
+// Search queries are domain-neutral: they are built only from the user's goal.
 function buildQueries(req) {
-  const g =
-    typeof req.goal === "string"
-      ? req.goal
-      : JSON.stringify(req.goal || {});
+  const g = goalText(req);
 
   const q = [
-    `${g} pretrained model open source`,
-    `${g} API free tier`,
-    `${g} GitHub implementation`
+    `${g} best tools and approaches`,
+    `${g} open source implementation GitHub`,
+    `${g} free tier hosted service`,
+    `how to build ${g}`
   ];
 
   if (req.failedStrategy) {
     q.push(
-      `${g} alternative faster setup ${req.failureReason || ""}`.trim()
+      `${g} alternative to ${req.failedStrategy} ${req.failureReason || ""}`.trim()
     );
   }
 
   return q;
 }
 
-function buildPrompt(req, sources) {
+function buildPrompt(req, sources, attempt) {
+  const goal = goalText(req);
+
   const sourceText = sources.length
     ? sources
         .map(
@@ -49,17 +74,20 @@ ${req.failureReason || "unknown"}
 DEADLINE REMAINING:
 ${req.deadlineRemaining || "unknown"}
 
-Find alternatives that specifically solve this failure.
+Find alternatives that specifically solve this failure. Do not return the failed strategy again.
 `
     : "";
 
+  const retryNote =
+    attempt > 1
+      ? "\nIMPORTANT: your previous answer was unusable. Return ONLY the JSON object described below, with at least 4 candidates.\n"
+      : "";
+
   return `
 You are the research engine of a goal-planning system.
-
-GOAL:
-${typeof req.goal === "string"
-  ? req.goal
-  : JSON.stringify(req.goal || {})}
+${retryNote}
+GOAL (research THIS goal and nothing else):
+${goal}
 
 DEADLINE:
 ${req.deadline || "not given"}
@@ -81,10 +109,11 @@ ${sourceText}
 Return ONLY JSON:
 
 {
+  "goalSummary": "one sentence restating the goal in your own words",
   "candidates": [
     {
       "name": "",
-      "type": "Model | API | Dataset | Library | Tool",
+      "type": "Model | API | Framework | Platform | Service | Library | Tool | Dataset",
       "solvesGoalDirectly": true,
       "source": "",
       "license": "",
@@ -109,13 +138,17 @@ Return ONLY JSON:
 }
 
 RULES:
+- Every candidate must be a real, existing way to accomplish the GOAL above, in the goal's own domain.
+  Never return candidates from an unrelated domain.
 - Give 6 to 10 candidates.
 - Include genuinely different approaches.
-- Prefer solutions compatible with the user's resources.
+- solvesGoalDirectly = true only for complete solutions; false for supporting libraries, datasets or toolkits.
+- Prefer solutions compatible with the user's resources, deadline and budget.
 - Do not invent benchmark numbers.
 - Do not invent URLs.
 - If evidence is unavailable, say so.
 - Higher score is better.
+- performance = how well it achieves the goal.
 - complexity 100 = easiest.
 - cost 100 = cheapest/free.
 - hardware 100 = easiest on available hardware.
@@ -135,13 +168,38 @@ function dedupeByUrl(list) {
   });
 }
 
-function finalize(
-  req,
-  candidates,
-  sources,
-  warnings,
-  usedFallback
-) {
+const num = v =>
+  typeof v === "number" && Number.isFinite(v)
+    ? Math.max(0, Math.min(100, Math.round(v)))
+    : null; // null = unverified, never silently invented
+
+function sanitize(c) {
+  if (!c || typeof c.name !== "string" || !c.name.trim()) return null;
+
+  const s = c.scores && typeof c.scores === "object" ? c.scores : {};
+
+  return {
+    ...c,
+    name: c.name.trim(),
+    type: typeof c.type === "string" && c.type ? c.type : "Tool",
+    solvesGoalDirectly: c.solvesGoalDirectly !== false,
+    scores: Object.fromEntries(KEYS.map(k => [k, num(s[k])])),
+    evidence: Array.isArray(c.evidence)
+      ? c.evidence
+          .filter(e => e && typeof e === "object")
+          .map(e => ({
+            type: String(e.type || "provider_claim"),
+            text: String(e.text || ""),
+            url:
+              typeof e.url === "string" && /^https?:\/\//.test(e.url)
+                ? e.url
+                : null
+          }))
+      : []
+  };
+}
+
+function finalize(req, candidates, sources, warnings, meta = {}) {
   const weights = buildWeights(req);
 
   const sourceUrls = new Set(
@@ -158,11 +216,7 @@ function finalize(
     )
   }));
 
-  const direct = scored.filter(
-    c =>
-      c.solvesGoalDirectly !== false &&
-      ["Model", "API"].includes(c.type)
-  );
+  const direct = scored.filter(isDirectSolution);
 
   const verifiedDirect = direct.filter(c => c.verified);
 
@@ -173,6 +227,8 @@ function finalize(
       ? direct
       : scored;
 
+  const usedFallback = meta.usedFallback === true;
+
   return {
     candidates: scored,
     shortlist: buildShortlist(pool),
@@ -181,23 +237,37 @@ function finalize(
 
     meta: {
       usedFallback,
+      genericFallback: meta.genericFallback === true,
+      researchFailed: false,
+      model: getModel(),
+      goalSummary: meta.goalSummary || null,
       warnings,
-      note:
-        "Fallback candidates are estimates and should be validated before real deployment."
+      note: usedFallback
+        ? "Generic strategy archetypes only: nothing was researched for this goal. Research the specific options before committing."
+        : "Scores are estimates unless backed by evidence and should be validated before real deployment."
     }
   };
 }
 
+// Generic, domain-neutral archetypes. Only used when explicitly allowed.
+function genericResult(req, sources, warnings) {
+  return finalize(
+    req,
+    GENERIC_APPROACHES.map(c => ({ ...c })),
+    sources,
+    warnings,
+    { usedFallback: true, genericFallback: true }
+  );
+}
+
 export async function research(req) {
-  // MOCK mode
+  const goal = goalText(req);
+  if (!goal) throw new Error("goal is required");
+
+  // MOCK mode (local testing): instant generic archetypes, no keys needed.
+  // It deliberately does not return any domain-specific data.
   if (process.env.MOCK === "true") {
-    return finalize(
-      req,
-      FALLBACK_CANDIDATES,
-      [],
-      ["MOCK mode enabled"],
-      true
-    );
+    return genericResult(req, [], ["MOCK mode enabled: generic archetypes only, no research was done"]);
   }
 
   const warnings = [];
@@ -211,10 +281,7 @@ export async function research(req) {
         try {
           return await webSearch(q);
         } catch (e) {
-          console.warn(
-            "Web search failed:",
-            e.message
-          );
+          console.warn("Web search failed:", e.message);
           return [];
         }
       })
@@ -222,74 +289,70 @@ export async function research(req) {
 
     sources = dedupeByUrl(results.flat());
   } catch (e) {
-    warnings.push(
-      `Web search failed: ${e.message}`
-    );
+    warnings.push(`Web search failed: ${e.message}`);
   }
 
   if (sources.length === 0) {
     warnings.push(
-      "No web sources found; fallback/model knowledge may be used."
+      "No web sources found; candidates come from Gemini's own knowledge and are unverified."
     );
   }
 
-  const prompt = buildPrompt(req, sources);
+  // Retry Gemini before giving up.
+  for (let attempt = 1; attempt <= RESEARCH_ATTEMPTS; attempt++) {
+    try {
+      const out = await askJSON(buildPrompt(req, sources, attempt));
 
-  try {
-    const out = await askJSON(prompt);
+      const arr = Array.isArray(out)
+        ? out
+        : out?.candidates ||
+          Object.values(out || {}).find(Array.isArray);
 
-    const arr = Array.isArray(out)
-      ? out
-      : out?.candidates ||
-        Object.values(out || {}).find(
-          Array.isArray
-        );
+      const cleaned = Array.isArray(arr)
+        ? arr.map(sanitize).filter(Boolean).slice(0, 10)
+        : [];
 
-    const cleaned = Array.isArray(arr)
-      ? arr.filter(c => c && c.name)
-      : [];
+      if (cleaned.length > 0) {
+        return finalize(req, cleaned, sources, warnings, {
+          goalSummary:
+            typeof out?.goalSummary === "string" ? out.goalSummary : null
+        });
+      }
 
-    if (cleaned.length > 0) {
-      return finalize(
-        req,
-        cleaned,
-        sources,
-        warnings,
-        false
+      warnings.push(
+        `Gemini returned no usable candidates (attempt ${attempt}/${RESEARCH_ATTEMPTS}).`
       );
+    } catch (e) {
+      console.warn(`Gemini research failed (attempt ${attempt}/${RESEARCH_ATTEMPTS}):`, e.message);
+      warnings.push(`Gemini unavailable: ${e.message}`);
+      // askJSON already retried transient errors; a permanent error (bad key / unknown model) will not improve.
+      if (/api_key|API key|not found|404|403|401|PERMISSION|missing/i.test(e.message)) break;
     }
-
-    warnings.push(
-      "Gemini returned no usable candidates."
-    );
-  } catch (e) {
-    console.warn(
-      "Gemini research failed:",
-      e.message
-    );
-
-    warnings.push(
-      `Gemini unavailable: ${e.message}`
-    );
   }
 
-  // CRITICAL:
-  // Never throw a 502 merely because Gemini failed.
-  return finalize(
-    req,
-    FALLBACK_CANDIDATES,
-    sources,
-    warnings,
-    true
+  // Research genuinely failed.
+  if (genericFallbackAllowed()) {
+    warnings.push("Using generic, domain-neutral strategy archetypes (ALLOW_GENERIC_FALLBACK).");
+    return genericResult(req, sources, warnings);
+  }
+
+  // Default: say so clearly. Never return candidates that were not researched for THIS goal.
+  throw new ResearchUnavailableError(
+    "Research failed for this goal; no relevant candidates are available.",
+    warnings
   );
 }
 
 export function compare(req) {
+  if (!Array.isArray(req.candidates) || req.candidates.length === 0) {
+    throw new Error("candidates[] is required");
+  }
+
   return finalize(
     req,
-    req.candidates || FALLBACK_CANDIDATES,
+    req.candidates,
     req.sources || [],
     [],
-    false
+    { usedFallback: false }
   );
 }
