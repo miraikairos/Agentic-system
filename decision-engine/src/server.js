@@ -18,7 +18,7 @@ app.get("/", (req, res) => {
 
 app.use("/", decisionRoutes);
 
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
   console.log(`Decision Engine running on http://localhost:${PORT}`);
