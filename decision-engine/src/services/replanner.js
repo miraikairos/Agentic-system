@@ -1,4 +1,5 @@
 const { GoogleGenAI } = require("@google/genai");
+const { getModel } = require("./geminiConfig");
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
@@ -89,9 +90,7 @@ function fallbackReplan(data) {
 }
 
 async function replan(data) {
-  const model =
-    process.env.GEMINI_MODEL ||
-    "gemini-3-flash-preview";
+  const model = getModel();
 
   const prompt = `
 You are the Replanning Engine of an adaptive goal-achievement system.
