@@ -1,4 +1,5 @@
 const { GoogleGenAI } = require("@google/genai");
+const { getModel } = require("./geminiConfig");
 
 const { isHardBlocker } = require("./strategy");
 
@@ -87,10 +88,11 @@ Rules:
   let result = {};
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash-lite",
-      contents: prompt
+      model: getModel(),
+      contents: prompt,
+      config: { responseMimeType: "application/json", temperature: 0.2 }
     });
-    result = JSON.parse(response.text);
+    result = JSON.parse(String(response.text || "").replace(/```json|```/gi, "").trim());
   } catch (err) {
     // Without an explicit blocker the original behaviour is kept (error propagates).
     if (!hardBlocker) throw err;
@@ -127,4 +129,4 @@ Rules:
 
 module.exports = {
   diagnose
-};
+};
