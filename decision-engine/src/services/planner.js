@@ -1,78 +1,9 @@
 const { GoogleGenAI } = require("@google/genai");
+const { getModel } = require("./geminiConfig");
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
 });
-
-const FALLBACK_CANDIDATES = [
-  {
-    name: "AASIST",
-    type: "Model",
-    description:
-      "Modern neural anti-spoofing approach.",
-    fitReason:
-      "Good when compute resources are available.",
-    scores: {
-      performance: 85,
-      complexity: 45,
-      cost: 100,
-      hardware: 45,
-      time: 30,
-      compatibility: 80
-    }
-  },
-
-  {
-    name: "RawNet2",
-    type: "Model",
-    description:
-      "Raw waveform anti-spoofing approach.",
-    fitReason:
-      "Alternative deep-learning strategy.",
-    scores: {
-      performance: 72,
-      complexity: 60,
-      cost: 100,
-      hardware: 65,
-      time: 50,
-      compatibility: 80
-    }
-  },
-
-  {
-    name: "LFCC-GMM",
-    type: "Model",
-    description:
-      "Lightweight CPU-friendly classical baseline.",
-    fitReason:
-      "Useful when GPU resources are limited.",
-    scores: {
-      performance: 65,
-      complexity: 85,
-      cost: 100,
-      hardware: 95,
-      time: 90,
-      compatibility: 90
-    }
-  },
-
-  {
-    name: "Hosted Detection API",
-    type: "API",
-    description:
-      "Cloud-based detection service.",
-    fitReason:
-      "Avoids local GPU requirements.",
-    scores: {
-      performance: null,
-      complexity: 90,
-      cost: 70,
-      hardware: 100,
-      time: 90,
-      compatibility: 85
-    }
-  }
-];
 
 async function getResearchFromMember2(data) {
   const url =
@@ -103,18 +34,71 @@ async function getResearchFromMember2(data) {
   );
 
   if (!response.ok) {
+    let detail = "";
+    try {
+      const body = await response.json();
+      detail = [
+        body.detail || body.message || body.error,
+        ...((body.meta && body.meta.warnings) || [])
+      ]
+        .filter(Boolean)
+        .join("; ");
+    } catch (e) {
+      /* body was not JSON */
+    }
+
     throw new Error(
-      `Research Engine returned ${response.status}`
+      `Research Engine returned ${response.status}` +
+        (detail ? `: ${detail}` : "")
     );
   }
 
   return await response.json();
 }
 
+/*
+  Research must be about THIS goal. If the Research Engine failed, returned nothing, or returned
+  its own fallback data (anything it flagged usedFallback that is not an explicit generic archetype list),
+  planning is refused: a strategy built from unrelated candidates is worse than an error.
+*/
+function assertUsableResearch(research) {
+  const meta = research?.meta || {};
+
+  if (meta.researchFailed === true) {
+    throw new Error(
+      "Research unavailable: " + ((meta.warnings || []).join("; ") || "research failed for this goal")
+    );
+  }
+
+  if (!research || !Array.isArray(research.candidates) || research.candidates.length === 0) {
+    throw new Error("Research Engine returned no candidates for this goal");
+  }
+
+  if (meta.usedFallback === true && meta.genericFallback !== true) {
+    throw new Error(
+      "Research Engine returned built-in fallback candidates instead of research for this goal: " +
+        ((meta.warnings || []).join("; ") || "no details")
+    );
+  }
+}
+
+const sameName = (a, b) =>
+  String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+
+// shortlist entries are summaries ({option,label,name,suitability}); resolve the full candidate.
+function pickSelected(data, research) {
+  if (data.selectedSolution) return data.selectedSolution;
+  if (research.selectedSolution) return research.selectedSolution;
+
+  const top = research.shortlist && research.shortlist[0];
+  const full = top && research.candidates.find((c) => sameName(c.name, top.name));
+
+  // candidates are already sorted by suitability
+  return full || research.candidates[0];
+}
+
 async function generateWithGemini(prompt) {
-  const model =
-    process.env.GEMINI_MODEL ||
-    "gemini-3-flash-preview";
+  const model = getModel();
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -152,13 +136,11 @@ async function generateWithGemini(prompt) {
 }
 
 function buildFallbackPlan(data, research) {
-  const candidates =
-    research?.candidates?.length
-      ? research.candidates
-      : FALLBACK_CANDIDATES;
+  const candidates = research?.candidates || [];
 
   const selected =
-    research?.shortlist?.[0] ||
+    research?.selectedSolution ||
+    candidates.find((c) => sameName(c.name, research?.shortlist?.[0]?.name)) ||
     candidates[0];
 
   const name =
@@ -243,55 +225,26 @@ async function generatePlan(data) {
   let research = data.research || {};
 
   /*
-   * First try Member 2.
-   * If Member 2 is unavailable, use local candidates.
+   * Research comes from the Research Engine (Member 2), for THIS goal.
+   * There is no local candidate list: if research fails, planning fails with a clear error.
    */
   if (
     !research ||
     !Array.isArray(research.candidates) ||
     research.candidates.length === 0
   ) {
+    console.log("No research supplied. Calling Member 2...");
+
+    research = await getResearchFromMember2(data);
+
     console.log(
-      "No research supplied. Calling Member 2..."
+      `Member 2 returned ${research.candidates?.length || 0} candidates`
     );
-
-    try {
-      research =
-        await getResearchFromMember2(data);
-
-      console.log(
-        `Member 2 returned ${
-          research.candidates?.length || 0
-        } candidates`
-      );
-
-    } catch (error) {
-      console.warn(
-        "Member 2 failed. Using local research fallback:",
-        error.message
-      );
-
-      research = {
-        candidates: FALLBACK_CANDIDATES,
-        shortlist: FALLBACK_CANDIDATES.slice(0, 3),
-        sources: [],
-        weights: null,
-        meta: {
-          usedFallback: true,
-          warnings: [
-            `Member 2 unavailable: ${error.message}`
-          ]
-        }
-      };
-    }
   }
 
-  const selectedSolution =
-    data.selectedSolution ||
-    research.selectedSolution ||
-    research.shortlist?.[0] ||
-    research.candidates?.[0] ||
-    FALLBACK_CANDIDATES[0];
+  assertUsableResearch(research);
+
+  const selectedSolution = pickSelected(data, research);
 
   const prompt = `
 You are the Planning Engine of an autonomous goal-achievement system.
