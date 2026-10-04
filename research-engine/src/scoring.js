@@ -1,8 +1,18 @@
 // All scores are 0-100 and HIGHER IS BETTER for the user:
-// performance = detection quality, complexity = 100 means very simple,
-// cost = 100 means free, hardware = 100 means runs on a laptop,
+// performance = how well it achieves the goal (quality of result), complexity = 100 means very simple,
+// cost = 100 means free, hardware = 100 means runs on the user's own machine,
 // time = 100 means very fast to set up, compatibility = fits user's resources.
-const KEYS = ["performance", "complexity", "cost", "hardware", "time", "compatibility"];
+export const KEYS = ["performance", "complexity", "cost", "hardware", "time", "compatibility"];
+
+// A "direct" candidate is a complete way to reach the goal (not just a supporting library or dataset).
+// Gemini's solvesGoalDirectly flag wins; otherwise the type decides. Works for any domain
+// (models/APIs for ML goals, frameworks/platforms for web goals, ...).
+const DIRECT_TYPES = ["Model", "API", "Framework", "Platform", "Service", "Tool", "Approach"];
+export function isDirectSolution(c) {
+  if (c?.solvesGoalDirectly === false) return false;
+  if (c?.solvesGoalDirectly === true) return true;
+  return DIRECT_TYPES.includes(c?.type);
+}
 
 export function parseHours(d) {
   if (typeof d === "number") return d;
