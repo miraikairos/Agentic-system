@@ -7,7 +7,8 @@ const {
   selectAlternativeSolution
 } = require("./strategy");
 
-const RESEARCH_URL = process.env.RESEARCH_ENGINE_URL || "http://localhost:4002/research";
+// RESEARCH_ENGINE_URL is the service base URL (same as the planner uses); /research is appended here.
+const RESEARCH_URL = `${(process.env.RESEARCH_ENGINE_URL || "http://localhost:4002").replace(/\/+$/, "")}/research`;
 
 /*
   Ask Member 2 for alternatives after the current strategy failed, then pick one.
@@ -54,9 +55,28 @@ async function reResearch(data, reality, diagnosis) {
       body: JSON.stringify(request),
       signal: AbortSignal.timeout(90000)
     });
-    if (!response.ok) throw new Error(`Research Engine returned ${response.status}`);
+    if (!response.ok) {
+      let detail = "";
+      try {
+        const body = await response.json();
+        detail = [body.detail || body.message || body.error, ...((body.meta && body.meta.warnings) || [])]
+          .filter(Boolean)
+          .join("; ");
+      } catch (e) {
+        /* body was not JSON */
+      }
+      throw new Error(`Research Engine returned ${response.status}${detail ? `: ${detail}` : ""}`);
+    }
 
     const research = await response.json();
+
+    // Never pick an alternative from the Research Engine's own fallback data: it is not about this goal.
+    if (research.meta && research.meta.usedFallback === true && research.meta.genericFallback !== true) {
+      throw new Error(
+        "Research Engine returned fallback data instead of research for this goal" +
+          ((research.meta.warnings || []).length ? `: ${research.meta.warnings.join("; ")}` : "")
+      );
+    }
     const choice = selectAlternativeSolution(research, { plan, reality });
 
     console.log(
