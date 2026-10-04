@@ -1,4 +1,5 @@
 const { GoogleGenAI } = require("@google/genai");
+const { getModel } = require("./geminiConfig");
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
@@ -79,9 +80,7 @@ Identify the user's actual priorities from the goal and constraints.
 Do not invent information that is not supported by the input.
 `;
 
-  const model =
-    process.env.GEMINI_MODEL ||
-    "gemini-3-flash-preview";
+  const model = getModel();
 
   // Retry temporary Gemini failures.
   for (let attempt = 1; attempt <= 3; attempt++) {
