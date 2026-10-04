@@ -59,6 +59,14 @@ function getFailedStrategyName(plan = {}) {
   );
 }
 
+// A complete way to reach the goal (any domain), not just a supporting library or dataset.
+const DIRECT_TYPES = ["Model", "API", "Framework", "Platform", "Service", "Tool", "Approach"];
+function isDirectSolution(c) {
+  if (c && c.solvesGoalDirectly === false) return false;
+  if (c && c.solvesGoalDirectly === true) return true;
+  return DIRECT_TYPES.includes(c && c.type);
+}
+
 const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const baseName = (s) => String(s || "").replace(/\(.*?\)/g, "");
 
@@ -71,7 +79,7 @@ function isSameAsFailed(candidateName, plan = {}) {
 /*
   Pick the best alternative from a Member 2 research response.
   - never the failed solution
-  - complete solutions (Model/API, solvesGoalDirectly !== false) first
+  - complete solutions (solvesGoalDirectly / Model, API, Framework, Platform, Service, Tool) first
   - for hardware blockers, only candidates that run on weak hardware (scores.hardware >= 60)
   - highest Member 2 suitability wins
 */
@@ -79,9 +87,7 @@ function selectAlternativeSolution(research = {}, { plan = {}, reality = {} } = 
   const all = Array.isArray(research.candidates) ? research.candidates : [];
   let pool = all.filter((c) => c && c.name && !isSameAsFailed(c.name, plan));
 
-  const direct = pool.filter(
-    (c) => c.solvesGoalDirectly !== false && ["Model", "API"].includes(c.type)
-  );
+  const direct = pool.filter(isDirectSolution);
   if (direct.length) pool = direct;
 
   if (isHardwareBlocker(reality)) {
