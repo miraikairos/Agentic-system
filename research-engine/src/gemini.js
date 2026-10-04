@@ -147,7 +147,9 @@ export async function askJSON(prompt) {
           problems.push(summarize(model, e.message, kind));
           permanent = false;
         } else {
-          await sleep(1500 * attempt);
+          // Honour Google's "retry in Ns" hint on short rate limits (capped); otherwise back off a little longer.
+          const hint = retryDelaySec(e.message);
+          await sleep(hint != null ? Math.min(hint, 20) * 1000 + 500 : 3000 * attempt);
         }
       }
     }
