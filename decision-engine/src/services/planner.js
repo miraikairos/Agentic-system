@@ -5,13 +5,46 @@ const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
 });
 
+/*
+  Render free instances go to sleep after ~15 min idle and need up to ~1 min to start. While that happens,
+  Render's proxy answers 502. The frontend only wakes the Decision Engine, so before asking the Research Engine
+  for anything we poll its /health until it answers OK (or give up after maxMs), then send the real request.
+*/
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function wakeResearchEngine(url, maxMs = 90000) {
+  const started = Date.now();
+  while (Date.now() - started < maxMs) {
+    try {
+      const r = await fetch(`${url}/health`, { signal: AbortSignal.timeout(15000) });
+      if (r.ok) return true;
+      console.warn(`Research Engine warm-up: /health returned ${r.status}, waiting...`);
+    } catch (e) {
+      console.warn("Research Engine warm-up:", e.message);
+    }
+    await sleep(4000);
+  }
+  return false;
+}
+
+async function fetchResearch(url, options) {
+  let response;
+  for (let i = 0; i < 2; i++) {
+    await wakeResearchEngine(url);
+    response = await fetch(url + "/research", options);
+    if (response.status !== 502 && response.status !== 504) return response;
+    console.warn(`Research Engine returned ${response.status} (still starting?), attempt ${i + 1}/2`);
+  }
+  return response;
+}
+
 async function getResearchFromMember2(data) {
   const url =
     process.env.RESEARCH_ENGINE_URL ||
     "http://localhost:4002";
 
-  const response = await fetch(
-    `${url}/research`,
+  const response = await fetchResearch(
+    url,
     {
       method: "POST",
       headers: {
