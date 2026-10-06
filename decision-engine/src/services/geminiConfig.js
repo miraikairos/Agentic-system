@@ -36,6 +36,11 @@ function isModelProblem(msg) {
   return quota || /not found|not supported|no longer available|404|permission_denied|permission denied|\b403\b/.test(m);
 }
 
+// Google says the model is overloaded right now ("high demand" 503). Another model may still answer.
+function isOverload(msg) {
+  return /unavailable|overloaded|high demand|\b503\b/i.test(String(msg || ""));
+}
+
 /*
   Drop-in replacement for ai.models.generateContent(request): tries the requested model, then each
   GEMINI_FALLBACK_MODELS entry when a model is out of quota or unavailable. Other errors (overload,
@@ -51,6 +56,12 @@ async function generateContent(ai, request) {
     try {
       return await ai.models.generateContent({ ...request, model });
     } catch (err) {
+      // Overloaded model: move straight on to the next configured model. On the last model, rethrow unchanged
+      // so each caller's own retry loop still runs.
+      if (isOverload(err.message) && !isModelProblem(err.message) && model !== models[models.length - 1]) {
+        console.warn(`Gemini model ${model} overloaded, trying next model:`, String(err.message).slice(0, 120));
+        continue;
+      }
       if (!isModelProblem(err.message)) throw err;
       console.warn(`Gemini model ${model} unavailable or out of quota:`, String(err.message).slice(0, 160));
       problems.push(model);
