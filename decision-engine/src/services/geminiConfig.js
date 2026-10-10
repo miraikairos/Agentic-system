@@ -128,4 +128,4 @@ async function generateContent(ai, request) {
   throw e;
 }
 
-module.exports = { getModel, getModels, generateContent, DEFAULT_MODEL };
+module.exports = { getModel, getModels, getApiKeys, generateContent, DEFAULT_MODEL };
