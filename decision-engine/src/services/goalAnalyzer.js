@@ -1,5 +1,5 @@
 const { GoogleGenAI } = require("@google/genai");
-const { getModel } = require("./geminiConfig");
+const { getModel, generateContent } = require("./geminiConfig");
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
@@ -86,7 +86,7 @@ Do not invent information that is not supported by the input.
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const response =
-        await ai.models.generateContent({
+        await generateContent(ai, {
           model,
           contents: prompt,
           config: {
@@ -135,7 +135,7 @@ Do not invent information that is not supported by the input.
         break;
       }
 
-      await sleep(1500 * attempt);
+      await sleep(Math.min(3000 * 2 ** (attempt - 1), 12000));
     }
   }
 
