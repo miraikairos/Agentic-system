@@ -1,5 +1,5 @@
 const { GoogleGenAI } = require("@google/genai");
-const { getModel } = require("./geminiConfig");
+const { getModel, generateContent } = require("./geminiConfig");
 
 const { isHardBlocker } = require("./strategy");
 
@@ -87,16 +87,39 @@ Rules:
 
   let result = {};
   try {
-    const response = await ai.models.generateContent({
-      model: getModel(),
-      contents: prompt,
-      config: { responseMimeType: "application/json", temperature: 0.2 }
-    });
+    // Retry temporary Gemini failures (503 overload etc.); generateContent also tries fallback models.
+    let response;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        response = await generateContent(ai, {
+          model: getModel(),
+          contents: prompt,
+          config: { responseMimeType: "application/json", temperature: 0.2 }
+        });
+        break;
+      } catch (e) {
+        if (attempt === 4 || e.permanent) throw e;
+        console.warn(`Diagnosis Gemini attempt ${attempt} failed:`, e.message);
+        await new Promise(r => setTimeout(r, Math.min(3000 * 2 ** (attempt - 1), 12000)));
+      }
+    }
     result = JSON.parse(String(response.text || "").replace(/```json|```/gi, "").trim());
   } catch (err) {
-    // Without an explicit blocker the original behaviour is kept (error propagates).
-    if (!hardBlocker) throw err;
-    console.warn("Diagnosis LLM failed, using blocker rules:", err.message);
+    // Never let a busy AI service crash /adapt: fall back to rules instead of throwing.
+    console.warn("Diagnosis LLM failed, using fallback rules:", err.message);
+    if (!hardBlocker) {
+      result = {
+        rootCause: "AI diagnosis was unavailable (service busy), so a conservative estimate was used.",
+        causeType: "estimation_failure",
+        strategyAffected: false,
+        explanation:
+          "The AI diagnosis could not run. No explicit blocker was detected, so the current strategy is kept and only the timing is adjusted.",
+        recommendation:
+          "Adjust the schedule and continue with the current strategy. Retry the adaptation shortly for a full diagnosis.",
+        confidence: 0.3,
+        degraded: true
+      };
+    }
   }
 
   /*
