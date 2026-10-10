@@ -2,6 +2,9 @@
 //   GEMINI_MODEL            primary model
 //   GEMINI_FALLBACK_MODELS  optional comma-separated list tried when the primary is out of quota or unavailable.
 //                           Free-tier quota is counted PER MODEL, so a second model gives extra daily capacity.
+//   GEMINI_API_KEYS         optional comma-separated list of keys; when one is out of quota the next is used.
+//                           Quota is counted per Google Cloud PROJECT, so keys only help if they come from
+//                           different projects. If unset, GEMINI_API_KEY is used alone.
 // Default for new projects per Google's deprecations page (2.5 models are restricted to existing users).
 export const DEFAULT_MODEL = "gemini-3.8-flash";
 
@@ -17,7 +20,17 @@ export function getModels() {
   return [...new Set([getModel(), ...extra])];
 }
 
-let ai;
+export function getApiKeys() {
+  const list = (process.env.GEMINI_API_KEYS || "")
+    .split(",")
+    .map((k) => k.trim())
+    .filter(Boolean);
+  const single = (process.env.GEMINI_API_KEY || "").trim();
+  return [...new Set([...list, ...(single ? [single] : [])])];
+}
+
+let clients; // one client per key, created on first use
+const preferredKey = new Map(); // model -> index of the key that last worked
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -69,6 +82,7 @@ function classify(msg) {
   if (/not found|not supported|no longer available|404/.test(m)) return "model";
   // PERMISSION_DENIED can be specific to one model (e.g. a preview model), so another model may still work.
   if (/permission_denied|permission|403/.test(m)) return "permission";
+  if (/invalid json|empty response|unexpected token/.test(m)) return "transient";
   if (/api key|api_key|401|unauthenticated|invalid/.test(m)) return "fatal";
   if (
     [
@@ -92,15 +106,16 @@ function summarize(model, msg, kind) {
 }
 
 export async function askJSON(prompt) {
-  if (!process.env.GEMINI_API_KEY) {
+  const keys = getApiKeys();
+  if (!keys.length) {
     const e = new Error("GEMINI_API_KEY is missing");
     e.permanent = true;
     throw e;
   }
 
-  if (!ai) {
+  if (!clients) {
     const { GoogleGenAI } = await import("@google/genai");
-    ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    clients = keys.map((apiKey) => new GoogleGenAI({ apiKey }));
   }
 
   const attempts = Math.max(1, Number(process.env.GEMINI_RETRIES) || 3);
@@ -109,49 +124,73 @@ export async function askJSON(prompt) {
   let permanent = true;
 
   for (const model of getModels()) {
-    for (let attempt = 1; attempt <= attempts; attempt++) {
-      try {
-        const res = await withTimeout(
-          ai.models.generateContent({
-            model,
-            contents: prompt,
-            config: { responseMimeType: "application/json", temperature: 0.2 },
-          }),
-          timeoutMs
-        );
+    const start = preferredKey.get(model) || 0;
 
-        const out = parseJSON(res.text);
-        console.log(`Gemini success using ${model} (attempt ${attempt})`);
-        return out;
-      } catch (e) {
-        const kind = classify(e.message);
-        console.warn(`Gemini ${model} attempt ${attempt}/${attempts} failed [${kind}]:`, String(e.message).slice(0, 200));
+    for (let k = 0; k < clients.length; k++) {
+      const ki = (start + k) % clients.length;
+      const client = clients[ki];
+      const keyLabel = clients.length > 1 ? ` key ${ki + 1}/${clients.length}` : "";
+      let nextKey = false; // quota / permission / bad key: this key is no use for this model, try another key
+      let nextModel = false; // model unknown, or still failing after retries: other keys will not help
 
-        if (kind === "fatal") {
-          const err = new Error(summarize(model, e.message, kind));
-          err.permanent = true;
-          throw err;
-        }
-        if (kind === "quota" || kind === "model" || kind === "permission") {
-          problems.push(
-            kind === "model"
-              ? `model ${model} is not available for this key (set GEMINI_MODEL to a current model from https://ai.google.dev/gemini-api/docs/models)`
-              : kind === "permission"
-              ? `Gemini permission denied for model ${model}: this API key may be invalid or restricted, or the Generative Language API is not enabled for its Google project. Check GEMINI_API_KEY on this service`
-              : summarize(model, e.message, kind)
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        try {
+          const res = await withTimeout(
+            client.models.generateContent({
+              model,
+              contents: prompt,
+              config: { responseMimeType: "application/json", temperature: 0.2 },
+            }),
+            timeoutMs
           );
-          break; // try the next configured model, if any
-        }
-        // transient
-        if (attempt === attempts) {
-          problems.push(summarize(model, e.message, kind));
-          permanent = false;
-        } else {
-          // Honour Google's "retry in Ns" hint on short rate limits (capped); otherwise back off a little longer.
-          const hint = retryDelaySec(e.message);
-          await sleep(hint != null ? Math.min(hint, 20) * 1000 + 500 : 3000 * attempt);
+
+          const out = parseJSON(res.text);
+          preferredKey.set(model, ki);
+          console.log(`Gemini success using ${model}${keyLabel} (attempt ${attempt})`);
+          return out;
+        } catch (e) {
+          const kind = classify(e.message);
+          console.warn(`Gemini ${model}${keyLabel} attempt ${attempt}/${attempts} failed [${kind}]:`, String(e.message).slice(0, 200));
+
+          if (kind === "fatal") {
+            if (clients.length > 1 && k < clients.length - 1) {
+              nextKey = true; // one bad key must not stop the others
+              break;
+            }
+            const err = new Error(summarize(model, e.message, kind));
+            err.permanent = true;
+            throw err;
+          }
+          if (kind === "model") {
+            problems.push(
+              `model ${model} is not available for this key (set GEMINI_MODEL to a current model from https://ai.google.dev/gemini-api/docs/models)`
+            );
+            nextModel = true;
+            break;
+          }
+          if (kind === "quota" || kind === "permission") {
+            problems.push(
+              kind === "permission"
+                ? `Gemini permission denied for model ${model}${keyLabel}: this API key may be invalid or restricted, or the Generative Language API is not enabled for its Google project. Check GEMINI_API_KEY on this service`
+                : summarize(model, e.message, kind) + (keyLabel ? ` (${keyLabel.trim()})` : "")
+            );
+            nextKey = true;
+            break;
+          }
+          // transient
+          if (attempt === attempts) {
+            problems.push(summarize(model, e.message, kind));
+            permanent = false;
+            nextModel = true;
+          } else {
+            // Honour Google's "retry in Ns" hint on short rate limits (capped); otherwise back off a little longer.
+            const hint = retryDelaySec(e.message);
+            await sleep(hint != null ? Math.min(hint, 20) * 1000 + 500 : 3000 * attempt);
+          }
         }
       }
+
+      if (nextModel || !nextKey) break; // keep trying other keys only after quota/permission/bad-key failures
     }
   }
 
