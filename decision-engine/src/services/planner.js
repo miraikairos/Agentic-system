@@ -133,7 +133,7 @@ function pickSelected(data, research) {
 async function generateWithGemini(prompt) {
   const model = getModel();
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 4; attempt++) {
     try {
       const response =
         await generateContent(ai, {
@@ -157,12 +157,12 @@ async function generateWithGemini(prompt) {
         error.message
       );
 
-      if (attempt === 3 || error.permanent) {
+      if (attempt === 4 || error.permanent) {
         throw error;
       }
 
       await new Promise(resolve =>
-        setTimeout(resolve, 1500 * attempt)
+        setTimeout(resolve, Math.min(3000 * 2 ** (attempt - 1), 12000))
       );
     }
   }
