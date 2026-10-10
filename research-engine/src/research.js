@@ -156,6 +156,9 @@ RULES:
 - Scores must separate the candidates. Use the full 0-100 range: on each dimension the best candidate should
   score at least 25 points higher than the weakest one. Do NOT give every candidate 85 or more.
 - Score candidates relative to each other and against the user's deadline, budget and resources.
+- Do not name a specific AI model version (for example "Gemini 1.5") unless a WEB SOURCE above mentions it.
+  Models get retired quickly: refer to the provider and model family (for example "Google Gemini API") and
+  prefer current offerings.
 - Each candidate must be a complete alternative to the others. Do not list a component and the framework or
   template that wraps it as separate competing options.
 `;
@@ -177,6 +180,18 @@ const num = v =>
   typeof v === "number" && Number.isFinite(v)
     ? Math.max(0, Math.min(100, Math.round(v)))
     : null; // null = unverified, never silently invented
+
+const normName = s => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+// True when a candidate is (or contains) the strategy that just failed. Used on re-research so the
+// failed strategy can never come back as a candidate, whatever Gemini returns.
+function isFailedStrategy(candidateName, failedStrategy) {
+  const failed = normName(failedStrategy);
+  if (!failed) return false;
+  const cand = normName(String(candidateName || "").replace(/\(.*?\)/g, ""));
+  if (cand.length < 4) return false;
+  return cand === failed || failed.includes(cand) || (failed.length >= 4 && cand.includes(failed));
+}
 
 function sanitize(c) {
   if (!c || typeof c.name !== "string" || !c.name.trim()) return null;
@@ -310,7 +325,11 @@ export async function research(req) {
           Object.values(out || {}).find(Array.isArray);
 
       const cleaned = Array.isArray(arr)
-        ? arr.map(sanitize).filter(Boolean).slice(0, 10)
+        ? arr
+            .map(sanitize)
+            .filter(Boolean)
+            .filter(c => !isFailedStrategy(c.name, req.failedStrategy))
+            .slice(0, 10)
         : [];
 
       if (cleaned.length > 0) {
