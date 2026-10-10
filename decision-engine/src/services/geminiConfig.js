@@ -33,6 +33,13 @@ function getApiKeys() {
   return [...new Set([...list, ...(single ? [single] : [])])];
 }
 
+// Other Decision Engine files create their own client from GEMINI_API_KEY. If only GEMINI_API_KEYS is set
+// (or GEMINI_API_KEY is empty), copy the first key into it now, before those files build their clients.
+if (!cleanKey(process.env.GEMINI_API_KEY)) {
+  const first = getApiKeys()[0];
+  if (first) process.env.GEMINI_API_KEY = first;
+}
+
 const clientCache = new Map();
 function clientFor(key) {
   if (!clientCache.has(key)) clientCache.set(key, new GoogleGenAI({ apiKey: key }));
