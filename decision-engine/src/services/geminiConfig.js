@@ -24,13 +24,13 @@ function getModels(first) {
 
 const { GoogleGenAI } = require("@google/genai");
 
+// Keys may be pasted with stray spaces or quotes; strip them.
+const cleanKey = (k) => String(k || "").trim().replace(/^["']+|["']+$/g, "").trim();
+
 function getApiKeys() {
-  const list = (process.env.GEMINI_API_KEYS || "")
-    .split(",")
-    .map((k) => k.trim())
-    .filter(Boolean);
-  const single = (process.env.GEMINI_API_KEY || "").trim();
-  return [...new Set([...(list.length ? list : []), ...(single ? [single] : [])])];
+  const list = (process.env.GEMINI_API_KEYS || "").split(",").map(cleanKey).filter(Boolean);
+  const single = cleanKey(process.env.GEMINI_API_KEY);
+  return [...new Set([...list, ...(single ? [single] : [])])];
 }
 
 const clientCache = new Map();
@@ -74,8 +74,14 @@ function isOverload(msg) {
 async function generateContent(ai, request) {
   const models = getModels(request.model);
   const keys = getApiKeys();
-  // With several keys use our own clients; otherwise keep using the caller's client unchanged.
-  const clients = keys.length > 1 ? keys.map(clientFor) : [ai];
+  // Always build clients from the configured keys. The caller's `ai` client is created from GEMINI_API_KEY only,
+  // so it has no key (and fails with "Could not load the default credentials") when only GEMINI_API_KEYS is set.
+  if (!keys.length) {
+    const e = new Error("No Gemini API key configured: set GEMINI_API_KEY (or GEMINI_API_KEYS) on this service.");
+    e.permanent = true;
+    throw e;
+  }
+  const clients = keys.map(clientFor);
   const problems = [];
 
   for (const model of models) {
