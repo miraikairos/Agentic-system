@@ -153,6 +153,11 @@ RULES:
 - cost 100 = cheapest/free.
 - hardware 100 = easiest on available hardware.
 - time 100 = fastest setup.
+- Scores must separate the candidates. Use the full 0-100 range: on each dimension the best candidate should
+  score at least 25 points higher than the weakest one. Do NOT give every candidate 85 or more.
+- Score candidates relative to each other and against the user's deadline, budget and resources.
+- Each candidate must be a complete alternative to the others. Do not list a component and the framework or
+  template that wraps it as separate competing options.
 `;
 }
 
@@ -218,14 +223,10 @@ function finalize(req, candidates, sources, warnings, meta = {}) {
 
   const direct = scored.filter(isDirectSolution);
 
-  const verifiedDirect = direct.filter(c => c.verified);
-
-  const pool =
-    verifiedDirect.length >= 3
-      ? verifiedDirect
-      : direct.length
-      ? direct
-      : scored;
+  // Pick by score among all complete solutions. Evidence is shown as a "verified" flag on each candidate,
+  // but an unverified candidate with a clearly higher score is no longer hidden from the shortlist
+  // (before, the shortlist was limited to verified candidates, so a lower-scored pick could beat a higher-scored one).
+  const pool = direct.length ? direct : scored;
 
   const usedFallback = meta.usedFallback === true;
 
