@@ -1,5 +1,5 @@
 const { GoogleGenAI } = require("@google/genai");
-const { getModel } = require("./geminiConfig");
+const { getModel, generateContent } = require("./geminiConfig");
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
@@ -167,7 +167,7 @@ Do NOT wrap the JSON in markdown.
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const response = await ai.models.generateContent({
+      const response = await generateContent(ai, {
         model,
         contents: prompt,
         config: {
@@ -267,7 +267,7 @@ Do NOT wrap the JSON in markdown.
         break;
       }
 
-      await sleep(1500 * attempt);
+      await sleep(Math.min(3000 * 2 ** (attempt - 1), 12000));
     }
   }
 
